@@ -1,5 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { classifyBookmark, generateEmbedding, embedSearchQuery, type BookmarkMetadata } from "./ai";
+import {
+  classifyBookmark,
+  generateEmbedding,
+  embedSearchQuery,
+  clearGenAIClientCache,
+  type BookmarkMetadata,
+} from "./ai";
 import { GoogleGenAI } from "@google/genai";
 
 const mockGenerateContent = vi.fn();
@@ -29,6 +35,7 @@ describe("ai.ts - Gemini AI layer", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    clearGenAIClientCache();
   });
 
   describe("classifyBookmark", () => {
@@ -38,7 +45,7 @@ describe("ai.ts - Gemini AI layer", () => {
       rawText: "React lets you build user interfaces out of individual pieces called components.",
     };
 
-    it("initializes GoogleGenAI with the provided API key and calls gemini-1.5-flash", async () => {
+    it("initializes GoogleGenAI with the provided API key and calls gemini-3.8-flash", async () => {
       const mockResult: BookmarkMetadata = {
         category: "Frontend",
         tags: ["react", "ui", "javascript"],
@@ -55,7 +62,7 @@ describe("ai.ts - Gemini AI layer", () => {
       expect(GoogleGenAI).toHaveBeenCalledWith({ apiKey: dummyApiKey });
       expect(mockGenerateContent).toHaveBeenCalledWith(
         expect.objectContaining({
-          model: "gemini-1.5-flash",
+          model: "gemini-3.8-flash",
           contents: expect.stringContaining("React 19 Documentation"),
           config: expect.objectContaining({
             responseMimeType: "application/json",

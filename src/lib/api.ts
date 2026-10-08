@@ -54,7 +54,8 @@ export async function searchBookmarks(query: string): Promise<Bookmark[]> {
 
   return db.select<Bookmark[]>(
     `SELECT b.id, b.url, b.title, b.description, b.domain, b.created_at,
-            ai.category as ai_category, ai.summary as ai_summary
+            ai.category as ai_category, ai.summary as ai_summary,
+            ai.tags as ai_tags, ai.technologies as ai_technologies
      FROM bookmarks b
      JOIN bookmarks_fts ON bookmarks_fts.rowid = b.rowid
      LEFT JOIN bookmarkAi ai ON ai.bookmarkId = b.id
@@ -76,7 +77,8 @@ export async function getRecentBookmarks(limit: number = 50): Promise<Bookmark[]
 
   return db.select<Bookmark[]>(
     `SELECT b.id, b.url, b.title, b.description, b.domain, b.created_at,
-            ai.category as ai_category, ai.summary as ai_summary
+            ai.category as ai_category, ai.summary as ai_summary,
+            ai.tags as ai_tags, ai.technologies as ai_technologies
      FROM bookmarks b
      LEFT JOIN bookmarkAi ai ON ai.bookmarkId = b.id
      ORDER BY created_at DESC
@@ -162,10 +164,29 @@ export interface FolderNode extends Folder {
   bookmarkCount?: number;
 }
 
+export interface FolderTreeOptions {
+  /** If true, prune folders that contain 0 bookmarks (both directly and in descendants) */
+  hideEmpty?: boolean;
+  /** If true, unwrap top-level browser artifact folders like 'Bookmarks bar' or 'Bookmarks Menu' */
+  unwrapBookmarksBar?: boolean;
+}
+
+const DEFAULT_BOOKMARK_BAR_NAMES = new Set([
+  "bookmarks bar",
+  "bookmark bar",
+  "bookmarks toolbar",
+  "bookmarks menu",
+  "other bookmarks",
+]);
+
 /**
  * Builds a hierarchical folder tree from all folders in SQLite.
+ * Supports unwrapping top-level browser export artifact folders (e.g. 'Bookmarks bar')
+ * and pruning empty folders.
  */
-export async function getFolderTree(): Promise<FolderNode[]> {
+export async function getFolderTree(
+  options: FolderTreeOptions = { unwrapBookmarksBar: true, hideEmpty: true }
+): Promise<FolderNode[]> {
   const folders = await getAllFolders();
   const db = await getDatabase();
 
@@ -187,7 +208,7 @@ export async function getFolderTree(): Promise<FolderNode[]> {
     });
   }
 
-  const rootNodes: FolderNode[] = [];
+  let rootNodes: FolderNode[] = [];
   for (const f of folders) {
     const node = nodeMap.get(f.id)!;
     if (f.parent_id && nodeMap.has(f.parent_id)) {
@@ -211,6 +232,34 @@ export async function getFolderTree(): Promise<FolderNode[]> {
     rollupCount(root);
   }
 
+  // Unwrap bookmarks bar containers if requested
+  if (options.unwrapBookmarksBar !== false) {
+    const unwrappedRoots: FolderNode[] = [];
+    for (const root of rootNodes) {
+      const lower = root.name.trim().toLowerCase();
+      if (DEFAULT_BOOKMARK_BAR_NAMES.has(lower) && root.children.length > 0) {
+        // Promote its children directly to root level
+        unwrappedRoots.push(...root.children);
+      } else {
+        unwrappedRoots.push(root);
+      }
+    }
+    rootNodes = unwrappedRoots;
+  }
+
+  // Prune empty folders if requested
+  if (options.hideEmpty) {
+    function pruneEmpty(nodes: FolderNode[]): FolderNode[] {
+      return nodes
+        .filter((node) => (node.bookmarkCount ?? 0) > 0)
+        .map((node) => ({
+          ...node,
+          children: pruneEmpty(node.children),
+        }));
+    }
+    rootNodes = pruneEmpty(rootNodes);
+  }
+
   return rootNodes;
 }
 
@@ -226,7 +275,8 @@ export async function getFolderBookmarks(
   if (!includeSubfolders) {
     return db.select<Bookmark[]>(
       `SELECT b.id, b.url, b.title, b.description, b.domain, b.created_at,
-              ai.category as ai_category, ai.summary as ai_summary
+              ai.category as ai_category, ai.summary as ai_summary,
+              ai.tags as ai_tags, ai.technologies as ai_technologies
        FROM bookmarks b
        JOIN bookmark_folders bf ON b.id = bf.bookmark_id
        LEFT JOIN bookmarkAi ai ON ai.bookmarkId = b.id
@@ -245,7 +295,8 @@ export async function getFolderBookmarks(
        JOIN folder_hierarchy fh ON f.parent_id = fh.id
      )
      SELECT DISTINCT b.id, b.url, b.title, b.description, b.domain, b.created_at,
-            ai.category as ai_category, ai.summary as ai_summary
+            ai.category as ai_category, ai.summary as ai_summary,
+            ai.tags as ai_tags, ai.technologies as ai_technologies
      FROM bookmarks b
      JOIN bookmark_folders bf ON b.id = bf.bookmark_id
      LEFT JOIN bookmarkAi ai ON ai.bookmarkId = b.id
@@ -594,6 +645,65 @@ export async function findDuplicateBookmarks(): Promise<DuplicateBookmarkGroup[]
   duplicateGroups.sort((a, b) => b.count - a.count);
 
   return duplicateGroups;
+}
+
+/**
+ * Deletes a single bookmark by ID and purges associations.
+ */
+export async function deleteBookmark(bookmarkId: string): Promise<void> {
+  const db = await getDatabase();
+  await db.execute("DELETE FROM bookmark_folders WHERE bookmark_id = ?", [bookmarkId]);
+  await db.execute("DELETE FROM bookmarkAi WHERE bookmarkId = ?", [bookmarkId]);
+  await db.execute("DELETE FROM bookmarkEmbeddings WHERE bookmarkId = ?", [bookmarkId]);
+  await db.execute("DELETE FROM bookmarks WHERE id = ?", [bookmarkId]);
+}
+
+/**
+ * Deduplicates a duplicate cluster by keeping one primary bookmark (by ID)
+ * and deleting all other duplicate records in the cluster.
+ */
+export async function deduplicateGroup(
+  keepBookmarkId: string,
+  removeBookmarkIds: string[]
+): Promise<void> {
+  for (const id of removeBookmarkIds) {
+    if (id !== keepBookmarkId) {
+      await deleteBookmark(id);
+    }
+  }
+}
+
+/**
+ * Exports all bookmarks and folders back into Netscape Bookmark File format (HTML).
+ */
+export async function exportBookmarksToHtml(): Promise<string> {
+  const db = await getDatabase();
+  const allBookmarks = await db.select<Bookmark[]>(
+    "SELECT id, url, title, description, domain, created_at FROM bookmarks ORDER BY created_at ASC"
+  );
+
+  let html = `<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<!-- This is an automatically generated file.
+     It will be read and overwritten.
+     DO NOT EDIT! -->
+<META HTTP-EQUIV="Content-Type" CONTENT="text/html; charset=UTF-8">
+<TITLE>Bookmarks</TITLE>
+<H1>Bookmarks</H1>
+<DL><p>
+`;
+
+  for (const b of allBookmarks) {
+    const addDate = Math.floor((b.created_at || Date.now()) / 1000);
+    const title = (b.title || b.url).replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const desc = b.description ? b.description.replace(/</g, "&lt;").replace(/>/g, "&gt;") : "";
+    html += `    <DT><A HREF="${b.url}" ADD_DATE="${addDate}">${title}</A>\n`;
+    if (desc) {
+      html += `    <DD>${desc}\n`;
+    }
+  }
+
+  html += `</DL><p>\n`;
+  return html;
 }
 
 

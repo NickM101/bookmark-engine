@@ -18,20 +18,41 @@ vi.mock("./fetcher", () => ({
   fetchBookmarkContent: vi.fn(),
 }));
 
-vi.mock("./ai", () => ({
-  classifyBookmark: vi.fn(),
-  generateEmbedding: vi.fn(),
-  isRateLimitError: (err: unknown) => {
-    if (!err) return false;
-    const msg = err instanceof Error ? err.message : String(err);
-    const lower = msg.toLowerCase();
-    return (
-      msg.includes("429") ||
-      lower.includes("resource_exhausted") ||
-      lower.includes("quota")
-    );
-  },
-}));
+vi.mock(import("./ai"), async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    classifyBookmark: vi.fn(),
+    generateEmbedding: vi.fn(),
+    classifyBookmarksBatch: vi.fn(async (inputs: any[]) => {
+      const map = new Map();
+      for (const input of inputs) {
+        const res = await (aiModule.classifyBookmark as any)(input, "test-key");
+        map.set(input.id, res);
+      }
+      return map;
+    }),
+    generateEmbeddingsBatch: vi.fn(async (inputs: any[]) => {
+      const list = [];
+      for (const input of inputs) {
+        const emb = await (aiModule.generateEmbedding as any)(input.text, "test-key");
+        list.push({ id: input.id, embedding: emb });
+      }
+      return list;
+    }),
+    isRateLimitError: (err: unknown) => {
+      if (!err) return false;
+      const msg = err instanceof Error ? err.message : String(err);
+      const lower = msg.toLowerCase();
+      return (
+        msg.includes("429") ||
+        lower.includes("resource_exhausted") ||
+        lower.includes("quota")
+      );
+    },
+  };
+});
+
 
 describe("processor.ts - Background AI Queue Worker (In-Memory SQLite)", () => {
   let sqlite: Database.Database;

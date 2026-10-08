@@ -201,6 +201,41 @@ describe("Core Engine API queries", () => {
     getDbSpy.mockRestore();
   });
 
+  it("getFolderTree unwraps 'Bookmarks bar' and prunes empty folders", async () => {
+    const mockFolders: Folder[] = [
+      { id: "f-bar", name: "Bookmarks bar", parent_id: null },
+      { id: "f-dev", name: "Dev Tools", parent_id: "f-bar" },
+      { id: "f-empty", name: "Empty Folder", parent_id: "f-bar" },
+    ];
+    const mockCounts = [
+      { folder_id: "f-dev", count: 8 },
+      { folder_id: "f-empty", count: 0 },
+    ];
+
+    const mockDb = {
+      select: async (query: string) => {
+        if (query.includes("FROM folders")) {
+          return mockFolders;
+        }
+        if (query.includes("FROM bookmark_folders")) {
+          return mockCounts;
+        }
+        return [];
+      },
+    };
+
+    const getDbSpy = vi.spyOn(dbModule, "getDatabase").mockResolvedValue(mockDb as any);
+
+    const tree = await getFolderTree({ unwrapBookmarksBar: true, hideEmpty: true });
+    // Root level should directly contain Dev Tools, unwrapping 'Bookmarks bar' and omitting 'Empty Folder'
+    expect(tree).toHaveLength(1);
+    expect(tree[0].id).toBe("f-dev");
+    expect(tree[0].name).toBe("Dev Tools");
+    expect(tree[0].bookmarkCount).toBe(8);
+
+    getDbSpy.mockRestore();
+  });
+
   it("getFolderBookmarks fetches bookmarks with recursive query", async () => {
     const executedQueries: { query: string; params?: unknown[] }[] = [];
     const mockBookmarks: Bookmark[] = [

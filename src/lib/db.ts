@@ -31,6 +31,8 @@ export interface Bookmark {
   created_at: number;
   ai_category?: string | null;
   ai_summary?: string | null;
+  ai_tags?: string | null;
+  ai_technologies?: string | null;
   similarityScore?: number;
   ai?: {
     summary: string | null;
@@ -213,6 +215,61 @@ export async function getDrizzleDb(): Promise<any> {
   return proxyDrizzleDb;
 }
 
+export interface BookmarkAIResultToSave {
+  bookmarkId: string;
+  metadata: BookmarkMetadata;
+  embedding?: number[];
+}
+
+/**
+ * Saves AI results for a batch of bookmarks in SQLite.
+ * Persists metadata and embeddings efficiently with conflict resolution.
+ */
+export async function saveBookmarkAIResults(
+  results: BookmarkAIResultToSave[]
+): Promise<void> {
+  if (!results || results.length === 0) return;
+  const db = await getDrizzleDb();
+
+  for (const item of results) {
+    await db
+      .insert(bookmarkAi)
+      .values({
+        bookmarkId: item.bookmarkId,
+        summary: item.metadata.summary,
+        category: item.metadata.category,
+        tags: JSON.stringify(item.metadata.tags || []),
+        technologies: JSON.stringify(item.metadata.technologies || []),
+        processedAt: Date.now(),
+      })
+      .onConflictDoUpdate({
+        target: bookmarkAi.bookmarkId,
+        set: {
+          summary: item.metadata.summary,
+          category: item.metadata.category,
+          tags: JSON.stringify(item.metadata.tags || []),
+          technologies: JSON.stringify(item.metadata.technologies || []),
+          processedAt: Date.now(),
+        },
+      });
+
+    if (item.embedding && item.embedding.length > 0) {
+      await db
+        .insert(bookmarkEmbeddings)
+        .values({
+          bookmarkId: item.bookmarkId,
+          embedding: JSON.stringify(item.embedding),
+        })
+        .onConflictDoUpdate({
+          target: bookmarkEmbeddings.bookmarkId,
+          set: {
+            embedding: JSON.stringify(item.embedding),
+          },
+        });
+    }
+  }
+}
+
 /**
  * Saves AI-generated metadata and vector embeddings for a bookmark using Drizzle's db.insert().
  * Serializes tags, technologies, and embedding arrays to JSON strings.
@@ -221,6 +278,23 @@ export async function saveBookmarkAI(
   bookmarkId: string,
   metadata: BookmarkMetadata,
   embedding: number[]
+): Promise<void> {
+  await saveBookmarkAIResults([
+    {
+      bookmarkId,
+      metadata,
+      embedding,
+    },
+  ]);
+}
+
+
+/**
+ * Preserves successfully generated classification metadata even if embeddings subsequently fail.
+ */
+export async function saveBookmarkMetadataOnly(
+  bookmarkId: string,
+  metadata: BookmarkMetadata
 ): Promise<void> {
   const db = await getDrizzleDb();
 
@@ -244,20 +318,8 @@ export async function saveBookmarkAI(
         processedAt: Date.now(),
       },
     });
-
-  await db
-    .insert(bookmarkEmbeddings)
-    .values({
-      bookmarkId,
-      embedding: JSON.stringify(embedding || []),
-    })
-    .onConflictDoUpdate({
-      target: bookmarkEmbeddings.bookmarkId,
-      set: {
-        embedding: JSON.stringify(embedding || []),
-      },
-    });
 }
+
 
 /**
  * Returns unprocessed bookmarks that do not yet have corresponding records
